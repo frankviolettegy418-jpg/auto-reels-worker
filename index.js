@@ -1,4 +1,4 @@
-const { readData } = require('./googleSheet') // Lưu ý hàm đổi tên thành readData
+const { getDoc } = require('./googleSheet')
 const { postReels, postComment } = require('./facebook')
 
 function random(min, max) {
@@ -6,101 +6,178 @@ function random(min, max) {
 }
 
 async function main() {
+  const doc = await getDoc()
   const now = new Date()
-  
-  // 1. Đọc cả 2 tab về
-  const { jobs, tokens } = await readData()
 
-  if (!jobs.length) {
-    console.log('No jobs found in Log Progress')
+  // 1. ĐỌC LOG PROGRESS (Bảng điều phối)
+  const logSheet = doc.sheetsByTitle['Log Progress']
+  if (!logSheet) throw new Error('Sheet "Log Progress" not found!')
+  
+  // Chỉ đọc 1000 dòng cuối để tối ưu như mày yêu cầu
+  const logs = await logSheet.getRows({ limit: 1000 })
+  if (logs.length === 0) {
+    console.log('💤 Log Progress is empty.')
     return
   }
 
-  // 2. Tìm Job cần chạy
-  const job =
-    jobs.find(j => j.Status === 'NOW') ||
-    jobs.find(j => j.Status === 'WAIT' && new Date(j.ScheduleTime) <= now) ||
-    jobs.find(j => j.Status === 'POSTED' && j.Comment === 'WAIT' && new Date(j.DelayComment) <= now)
+  // 2. TÌM JOB CẦN XỬ LÝ (NOW hoặc WAIT tới giờ)
+  const jobRow = logs.find(row => {
+    const status = row.get('Status')
+    const schedule = row.get('ScheduleTime')
+    const delayComment = row.get('Delay Comment')
+    const commentStatus = row.get('Comment')
 
-  if (!job) {
-    console.log('No executable job')
+    // Ưu tiên 1: Chạy ngay lệnh NOW
+    if (status === 'NOW') return true
+
+    // Ưu tiên 2: Chạy lệnh WAIT đã tới giờ
+    if (status === 'WAIT' && schedule) {
+        // Xử lý ngày tháng format DD/MM/YYYY HH:mm:ss
+        const [datePart, timePart] = schedule.split(' ')
+        const [day, month, year] = datePart.split('/')
+        const targetTime = new Date(`${year}-${month}-${day}T${timePart}`)
+        return targetTime <= now
+    }
+
+    // Ưu tiên 3: Check Comment (POSTED -> Comment WAIT -> tới giờ)
+    if (status === 'POSTED' && commentStatus === 'WAIT' && delayComment) {
+        const targetTime = new Date(delayComment) // Format ISO log ghi ra chuẩn rồi
+        return targetTime <= now
+    }
+
+    return false
+  })
+
+  if (!jobRow) {
+    console.log('✅ No jobs to run at this time.')
     return
   }
 
-  console.log(`Processing Job: ${job.rowNumber} - Status: ${job.Status}`)
+  console.log(`🚀 Found Job at Row ${jobRow.rowNumber} | Status: ${jobRow.get('Status')}`)
 
-  // 3. LOGIC GHÉP DỮ LIỆU (QUAN TRỌNG)
-  // Tìm thông tin Page từ tab PAGE_TOKEN dựa vào cột PageSet (VD: Page001)
-  const pageInfo = tokens.find(t => t.PageSet === job.PageSet)
-  
+  // === XỬ LÝ THÔNG TIN CƠ BẢN ===
+  const pageSet = jobRow.get('PageSet') // VD: Page001
+  const contentTabName = jobRow.get('Sheet Content') // VD: 01. GiaDung
+  const contentSTT = jobRow.get('STT_SheetContent') // VD: 21
+
+  // 3. LẤY TOKEN TỪ SHEET "PAGE_TOKEN"
+  const tokenSheet = doc.sheetsByTitle['PAGE_TOKEN']
+  const tokenRows = await tokenSheet.getRows()
+  const pageInfo = tokenRows.find(r => r.get('PageSet') === pageSet)
+
   if (!pageInfo) {
-    console.error(`❌ Không tìm thấy thông tin cho ${job.PageSet} trong tab PAGE_TOKEN`)
+    console.error(`❌ Cannot find PageSet "${pageSet}" in PAGE_TOKEN sheet.`)
     return
   }
-
-  // Gán dữ liệu vào job để facebook.js dùng được
-  // CHÚ Ý: Map đúng tên cột trong ảnh bạn gửi
-  job.PageId = pageInfo.PageID       // Cột PageID bên tab PAGE_TOKEN
-  job.PageToken = pageInfo.Token     // Cột Token bên tab PAGE_TOKEN
-  job.VideoPath = job['Sheet Content'] // Map cột Sheet Content thành đường dẫn video
   
-  // Kiểm tra an toàn
-  if (!job.PageId || !job.PageToken) {
-    console.error('❌ Thiếu PageId hoặc PageToken trong tab cấu hình')
+  const pageId = pageInfo.get('Page ID') // Sửa tên cột theo ảnh mày gửi (có dấu cách)
+  const pageToken = pageInfo.get('Page Access Token') // Sửa tên cột theo ảnh
+
+  if (!pageId || !pageToken) {
+    console.error('❌ Missing Page ID or Token in configuration.')
     return
   }
 
-  // ===== POST REELS =====
-  if (job.Status === 'NOW' || job.Status === 'WAIT') {
+  // === TRƯỜNG HỢP 1: ĐĂNG REELS (NOW / WAIT) ===
+  if (jobRow.get('Status') === 'NOW' || jobRow.get('Status') === 'WAIT') {
+    
+    // 4. LẤY NỘI DUNG TỪ SHEET CONTENT CỤ THỂ
+    const contentSheet = doc.sheetsByTitle[contentTabName]
+    if (!contentSheet) {
+        console.error(`❌ Content Sheet "${contentTabName}" not found!`)
+        return
+    }
+
+    // Tìm dòng nội dung theo STT_SheetContent
+    const contentRows = await contentSheet.getRows()
+    const contentRow = contentRows.find(r => r.get('STT_SheetContent') === contentSTT)
+
+    if (!contentRow) {
+        console.error(`❌ Content ID "${contentSTT}" not found in sheet "${contentTabName}"`)
+        return
+    }
+
+    const caption = contentRow.get('Caption')
+    const commentText = contentRow.get('Comment')
+
+    // Chuẩn bị job data
+    const jobData = {
+        PageId: pageId,
+        PageToken: pageToken,
+        Caption: caption,
+        VideoPath: contentTabName // Giả định tên folder video trùng tên sheet (vd: 01. GiaDung)
+    }
+
     try {
-      console.log('Posting Reel...')
-      const { reelId, reelLink } = await postReels(job)
-      
-      console.log('✅ Posted:', reelLink)
-      job.Status = 'POSTED'
-      job.ReelId = reelId // Lưu vào bộ nhớ tạm để dùng
-      job['Link Reels'] = reelLink // Lưu vào cột Link Reels (tên có dấu cách)
-      
-      // Hẹn giờ comment
-      job.DelayComment = new Date(Date.now() + random(5, 10) * 60000).toISOString()
-      job.Comment = 'WAIT'
-      await job.save()
-    } catch (err) {
-      console.error('❌ Post Failed:', err.message)
-      // Không save lỗi để lần sau chạy lại (hoặc bạn có thể set Status = ERROR)
+        // GỌI HÀM POST
+        const { reelId, reelLink } = await postReels(jobData)
+        console.log(`✅ Posted successfully: ${reelLink}`)
+
+        // Cập nhật Log Progress
+        jobRow.set('Status', 'POSTED')
+        jobRow.set('Link Reels', reelLink)
+        // Tính giờ comment (VD: 5-10 phút nữa)
+        const delayMin = random(5, 10)
+        const commentTime = new Date(now.getTime() + delayMin * 60000)
+        jobRow.set('Delay Comment', commentTime.toISOString())
+        jobRow.set('Comment', 'WAIT')
+        await jobRow.save()
+
+        // Cập nhật Content Sheet -> Đánh dấu DONE
+        contentRow.set('Status', 'Done')
+        await contentRow.save()
+        console.log(`📌 Marked Content ${contentSTT} as Done.`)
+
+    } catch (error) {
+        console.error('❌ Posting Failed:', error.message)
     }
-    return
   }
 
-  // ===== COMMENT =====
-  if (job.Status === 'POSTED' && job.Comment === 'WAIT') {
-    // Với comment cũng cần ReelId, nếu cột trên sheet tên khác thì phải map lại
-    // Giả sử trên sheet bạn chưa có cột ReelId, code sẽ lấy từ job đã load
-    // Nhưng nếu chạy lại từ đầu thì cần cột ReelId trên sheet Log Progress để lưu ID bài viết.
-    // Tạm thời code này chạy luồng liền mạch.
+  // === TRƯỜNG HỢP 2: COMMENT (WAIT -> DONE) ===
+  else if (jobRow.get('Status') === 'POSTED' && jobRow.get('Comment') === 'WAIT') {
+    const linkReels = jobRow.get('Link Reels')
     
-    // Nếu job.ReelId bị thiếu (do load mới), cần đảm bảo bạn có cột lưu ID bài viết trên Sheet
-    // Ở file ảnh tôi chưa thấy cột Reel ID, chỉ thấy Link Reels.
-    // Facebook API cần ID để comment. Bạn nên thêm cột "ReelId" vào sheet Log Progress.
-    
-    if(!job.ReelId && job['Link Reels']) {
-        // Hack tạm: Lấy ID từ Link nếu có
-        // Link: https://www.facebook.com/123456 -> ID 123456
-        const match = job['Link Reels'].match(/\/(\d+)/)
-        if(match) job.ReelId = match[1]
+    // Hack: Lấy ID từ Link (nếu chưa lưu cột ReelId)
+    // Link: https://www.facebook.com/123456789
+    let reelId = ''
+    const match = linkReels.match(/facebook\.com\/(\d+)/) || linkReels.match(/\/reel\/(\d+)/)
+    if (match) reelId = match[1]
+
+    if (!reelId) {
+        console.error('❌ Could not extract Reel ID for commenting.')
+        return
     }
 
-    if(job.ReelId) {
-        await postComment(job)
-        job.Comment = 'DONE'
-        await job.save()
+    // Lấy lại nội dung comment (phải đọc lại sheet content vì Log Progress không lưu text comment)
+    // Lưu ý: Logic này hơi rườm rà, tốt nhất mày nên lưu luôn nội dung comment vào Log Progress lúc Post
+    // Nhưng tao sẽ làm theo logic hiện tại: Đọc lại Content Sheet
+    const contentSheet = doc.sheetsByTitle[contentTabName]
+    const contentRows = await contentSheet.getRows()
+    const contentRow = contentRows.find(r => r.get('STT_SheetContent') === contentSTT)
+    const commentText = contentRow ? contentRow.get('Comment') : ''
+
+    if (commentText) {
+        try {
+            await postComment({
+                ReelId: reelId,
+                PageToken: pageToken,
+                CommentText: commentText
+            })
+            console.log('✅ Commented successfully.')
+            jobRow.set('Comment', 'DONE')
+            await jobRow.save()
+        } catch (error) {
+            console.error('❌ Comment Failed:', error.message)
+        }
     } else {
-        console.log('Skip Comment: No ReelId found')
+        console.log('⚠️ No comment text found, marking DONE.')
+        jobRow.set('Comment', 'DONE')
+        await jobRow.save()
     }
   }
 }
 
 main().catch(err => {
-  console.error(err)
+  console.error('🔥 Critical Error:', err)
   process.exit(1)
 })

@@ -25,7 +25,7 @@ jobs:
 
       - name: Run worker
         env:
+          # Chỉ cần 2 biến này thôi (nhớ setup trong Secrets)
           SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          GS_CLIENT_EMAIL: ${{ secrets.GS_CLIENT_EMAIL }}
-          GS_PRIVATE_KEY: ${{ secrets.GS_PRIVATE_KEY }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: node index.js

@@ -8,7 +8,7 @@ if (!SHEET_ID || !GOOGLE_CREDENTIALS) {
   throw new Error('Missing env vars: SHEET_ID or GOOGLE_CREDENTIALS')
 }
 
-function getDoc() {
+async function getDoc() {
   let creds
   try {
     creds = JSON.parse(GOOGLE_CREDENTIALS)
@@ -22,27 +22,11 @@ function getDoc() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   })
 
-  return new GoogleSpreadsheet(SHEET_ID, auth)
-}
-
-async function readData() {
-  const doc = getDoc()
+  const doc = new GoogleSpreadsheet(SHEET_ID, auth)
   await doc.loadInfo()
-
-  // Lấy đúng tên Tab (Quan trọng)
-  const sheetJobs = doc.sheetsByTitle['Log Progress']
-  const sheetTokens = doc.sheetsByTitle['PAGE_TOKEN']
-
-  if (!sheetJobs || !sheetTokens) {
-    throw new Error('Không tìm thấy tab "Log Progress" hoặc "PAGE_TOKEN"')
-  }
-
-  const jobs = await sheetJobs.getRows()
-  const tokens = await sheetTokens.getRows()
-
-  return { jobs, tokens }
+  return doc
 }
 
 module.exports = {
-  readData
+  getDoc
 }

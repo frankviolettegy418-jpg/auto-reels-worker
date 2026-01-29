@@ -3,32 +3,29 @@ const path = require('path')
 const fetch = require('node-fetch')
 const FormData = require('form-data')
 
-const pick = arr => arr[Math.floor(Math.random() * arr.length)]
-
-function parseRandomText(text = '') {
-  return text.replace(/\{([^}]+)\}/g, (_, g) =>
-    pick(g.split('|'))
-  )
-}
-
 async function postReels(job) {
-  if (!fs.existsSync(job.VideoPath)) {
-    throw new Error('Video folder not found')
+  // VideoPath sẽ là tên folder tương ứng với "Sheet Content" (vd: 01. GiaDung)
+  // Đảm bảo mày đã upload folder "01. GiaDung" chứa video .mp4 lên GitHub
+  const videoDir = path.join(__dirname, job.VideoPath)
+
+  if (!fs.existsSync(videoDir)) {
+    throw new Error(`Video folder not found: ${videoDir}`)
   }
 
-  const videos = fs.readdirSync(job.VideoPath).filter(f => f.endsWith('.mp4'))
-  if (!videos.length) throw new Error('No mp4 file')
+  const videos = fs.readdirSync(videoDir).filter(f => f.endsWith('.mp4'))
+  if (!videos.length) throw new Error(`No mp4 files in folder: ${videoDir}`)
 
-  const file = pick(videos)
-  const caption = parseRandomText(job.Caption || '')
+  // Random 1 video trong folder đó
+  const file = videos[Math.floor(Math.random() * videos.length)]
+  console.log(`🎬 Uploading video: ${file}`)
 
   const form = new FormData()
   form.append('access_token', job.PageToken)
-  form.append('description', caption)
-  form.append('source', fs.createReadStream(path.join(job.VideoPath, file)))
+  form.append('description', job.Caption || '')
+  form.append('source', fs.createReadStream(path.join(videoDir, file)))
 
   const res = await fetch(
-    `https://graph.facebook.com/v24.0/${job.PageId}/videos`,
+    `https://graph.facebook.com/v19.0/${job.PageId}/videos`,
     { method: 'POST', body: form }
   )
 
@@ -42,20 +39,27 @@ async function postReels(job) {
 }
 
 async function postComment(job) {
-  if (!job.CommentText) return
+  if (!job.CommentText) {
+    console.log('⚠️ No comment text provided, skipping.')
+    return
+  }
 
-  const text = parseRandomText(job.CommentText)
-
-  await fetch(
-    `https://graph.facebook.com/v24.0/${job.ReelId}/comments`,
+  console.log(`💬 Commenting on Reel ID: ${job.ReelId}`)
+  
+  const res = await fetch(
+    `https://graph.facebook.com/v19.0/${job.ReelId}/comments`,
     {
       method: 'POST',
       body: new URLSearchParams({
         access_token: job.PageToken,
-        message: text
+        message: job.CommentText
       })
     }
   )
+  
+  const json = await res.json()
+  if (json.error) throw new Error(json.error.message)
+  return json
 }
 
 module.exports = {

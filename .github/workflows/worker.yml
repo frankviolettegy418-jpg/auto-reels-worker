@@ -1,4 +1,15 @@
-steps:
+name: Auto Reels Worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -12,17 +23,9 @@ steps:
           rm -rf node_modules package-lock.json
           npm install
 
-      # THÊM ĐOẠN NÀY ĐỂ KIỂM TRA BIẾN
-      - name: Debug Secrets (Check only)
-        env:
-          CHECK_SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          CHECK_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: |
-          if [ -z "$CHECK_SHEET_ID" ]; then echo "❌ LỖI: Secret 'SPREADSHEET_ID' chưa có hoặc sai tên!"; else echo "✅ Secret 'SPREADSHEET_ID' đã OK."; fi
-          if [ -z "$CHECK_CREDENTIALS" ]; then echo "❌ LỖI: Secret 'GOOGLE_CREDENTIALS' chưa có hoặc sai tên!"; else echo "✅ Secret 'GOOGLE_CREDENTIALS' đã OK."; fi
-
       - name: Run worker
         env:
+          # Đã sửa lại cho khớp với tên Secret bạn vừa tạo
           SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: node index.js

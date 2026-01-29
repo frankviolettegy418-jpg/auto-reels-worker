@@ -1,3 +1,6 @@
+const fs = require('fs')
+const path = require('path')
+const fetch = require('node-fetch')
 const { getDoc } = require('./googleSheet')
 const { postReels, postComment } = require('./facebook')
 
@@ -5,179 +8,207 @@ function random(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
+// Hàm tải video từ Link Google Drive về máy
+async function downloadVideo(url, destPath) {
+  // Regex lấy File ID từ link (link view hoặc link share đều chạy)
+  const idMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/)
+  if (!idMatch) throw new Error('Invalid Google Drive Link')
+  const fileId = idMatch[1]
+  
+  const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`
+  
+  const res = await fetch(downloadUrl)
+  if (!res.ok) throw new Error(`Cannot download video. Status: ${res.statusText}`)
+  
+  const fileStream = fs.createWriteStream(destPath)
+  await new Promise((resolve, reject) => {
+    res.body.pipe(fileStream)
+    res.body.on('error', reject)
+    fileStream.on('finish', resolve)
+  })
+  
+  return destPath
+}
+
 async function main() {
   const doc = await getDoc()
   const now = new Date()
 
-  // 1. ĐỌC LOG PROGRESS (Bảng điều phối)
+  // 1. ĐỌC LOG PROGRESS
   const logSheet = doc.sheetsByTitle['Log Progress']
-  if (!logSheet) throw new Error('Sheet "Log Progress" not found!')
-  
-  // Chỉ đọc 1000 dòng cuối để tối ưu như mày yêu cầu
+  if (!logSheet) throw new Error('Không tìm thấy sheet "Log Progress"')
   const logs = await logSheet.getRows({ limit: 1000 })
-  if (logs.length === 0) {
-    console.log('💤 Log Progress is empty.')
-    return
-  }
-
-  // 2. TÌM JOB CẦN XỬ LÝ (NOW hoặc WAIT tới giờ)
+  
+  // 2. TÌM JOB CẦN XỬ LÝ (Khớp logic NOW hoặc WAIT)
   const jobRow = logs.find(row => {
     const status = row.get('Status')
     const schedule = row.get('ScheduleTime')
     const delayComment = row.get('Delay Comment')
     const commentStatus = row.get('Comment')
 
-    // Ưu tiên 1: Chạy ngay lệnh NOW
+    // Ưu tiên chạy NOW
     if (status === 'NOW') return true
-
-    // Ưu tiên 2: Chạy lệnh WAIT đã tới giờ
+    
+    // Chạy WAIT nếu tới giờ
     if (status === 'WAIT' && schedule) {
-        // Xử lý ngày tháng format DD/MM/YYYY HH:mm:ss
         const [datePart, timePart] = schedule.split(' ')
         const [day, month, year] = datePart.split('/')
         const targetTime = new Date(`${year}-${month}-${day}T${timePart}`)
         return targetTime <= now
     }
-
-    // Ưu tiên 3: Check Comment (POSTED -> Comment WAIT -> tới giờ)
+    
+    // Chạy Comment nếu tới giờ
     if (status === 'POSTED' && commentStatus === 'WAIT' && delayComment) {
-        const targetTime = new Date(delayComment) // Format ISO log ghi ra chuẩn rồi
+        const targetTime = new Date(delayComment)
         return targetTime <= now
     }
-
     return false
   })
 
   if (!jobRow) {
-    console.log('✅ No jobs to run at this time.')
+    console.log('✅ Không có Job nào cần chạy lúc này.')
     return
   }
 
-  console.log(`🚀 Found Job at Row ${jobRow.rowNumber} | Status: ${jobRow.get('Status')}`)
-
-  // === XỬ LÝ THÔNG TIN CƠ BẢN ===
-  const pageSet = jobRow.get('PageSet') // VD: Page001
+  // Lấy thông tin từ dòng Log tìm được
+  const pageSet = jobRow.get('PageSet') 
   const contentTabName = jobRow.get('Sheet Content') // VD: 01. GiaDung
   const contentSTT = jobRow.get('STT_SheetContent') // VD: 21
 
-  // 3. LẤY TOKEN TỪ SHEET "PAGE_TOKEN"
+  console.log(`🚀 Xử lý Job: Row ${jobRow.rowNumber} | Sheet: ${contentTabName} | STT: ${contentSTT}`)
+
+  // 3. TRA CỨU TOKEN TRONG PAGE_TOKEN (Theo tên cột anh đưa)
   const tokenSheet = doc.sheetsByTitle['PAGE_TOKEN']
+  if (!tokenSheet) throw new Error('Không tìm thấy sheet "PAGE_TOKEN"')
+    
   const tokenRows = await tokenSheet.getRows()
+  // So khớp cột PageSet
   const pageInfo = tokenRows.find(r => r.get('PageSet') === pageSet)
 
   if (!pageInfo) {
-    console.error(`❌ Cannot find PageSet "${pageSet}" in PAGE_TOKEN sheet.`)
+    console.error(`❌ Không tìm thấy PageSet "${pageSet}" trong sheet PAGE_TOKEN.`)
     return
   }
   
-  const pageId = pageInfo.get('Page ID') // Sửa tên cột theo ảnh mày gửi (có dấu cách)
-  const pageToken = pageInfo.get('Page Access Token') // Sửa tên cột theo ảnh
+  // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
+  const pageId = pageInfo.get('PageID') 
+  const pageToken = pageInfo.get('Token') 
 
   if (!pageId || !pageToken) {
-    console.error('❌ Missing Page ID or Token in configuration.')
+    console.error(`❌ Thiếu PageID hoặc Token. Kiểm tra lại cột trong PAGE_TOKEN.`)
     return
   }
 
-  // === TRƯỜNG HỢP 1: ĐĂNG REELS (NOW / WAIT) ===
+  // === XỬ LÝ ĐĂNG REELS ===
   if (jobRow.get('Status') === 'NOW' || jobRow.get('Status') === 'WAIT') {
     
-    // 4. LẤY NỘI DUNG TỪ SHEET CONTENT CỤ THỂ
+    // Mở Sheet Content (VD: 01. GiaDung)
     const contentSheet = doc.sheetsByTitle[contentTabName]
     if (!contentSheet) {
-        console.error(`❌ Content Sheet "${contentTabName}" not found!`)
+        console.error(`❌ Không tìm thấy sheet nội dung: "${contentTabName}"`)
         return
     }
 
-    // Tìm dòng nội dung theo STT_SheetContent
     const contentRows = await contentSheet.getRows()
-    const contentRow = contentRows.find(r => r.get('STT_SheetContent') === contentSTT)
+    // Tìm dòng có cột STT khớp với STT_SheetContent
+    // Lưu ý: Ép kiểu về String để so sánh cho chắc ăn
+    const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
 
     if (!contentRow) {
-        console.error(`❌ Content ID "${contentSTT}" not found in sheet "${contentTabName}"`)
+        console.error(`❌ Không tìm thấy bài có STT "${contentSTT}" trong sheet "${contentTabName}"`)
         return
     }
 
+    // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
     const caption = contentRow.get('Caption')
-    const commentText = contentRow.get('Comment')
+    const videoLink = contentRow.get('Video Google Driver') 
 
-    // Chuẩn bị job data
-    const jobData = {
-        PageId: pageId,
-        PageToken: pageToken,
-        Caption: caption,
-        VideoPath: contentTabName // Giả định tên folder video trùng tên sheet (vd: 01. GiaDung)
+    if (!videoLink) {
+        console.error('❌ Cột "Video Google Driver" bị trống.')
+        return
     }
 
+    console.log(`📥 Đang tải video từ Drive: ${videoLink}`)
+    // Đường dẫn lưu tạm file video
+    const tempVideoPath = path.join(__dirname, `video_temp_${Date.now()}.mp4`)
+
     try {
-        // GỌI HÀM POST
+        // Tải video
+        await downloadVideo(videoLink, tempVideoPath)
+        console.log('✅ Tải video thành công.')
+
+        const jobData = {
+            PageId: pageId,
+            PageToken: pageToken,
+            Caption: caption,
+            VideoFilePath: tempVideoPath
+        }
+
+        // Đăng bài
         const { reelId, reelLink } = await postReels(jobData)
-        console.log(`✅ Posted successfully: ${reelLink}`)
+        console.log(`✅ Đăng thành công: ${reelLink}`)
+
+        // Xóa file tạm
+        if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath)
 
         // Cập nhật Log Progress
         jobRow.set('Status', 'POSTED')
         jobRow.set('Link Reels', reelLink)
-        // Tính giờ comment (VD: 5-10 phút nữa)
-        const delayMin = random(5, 10)
-        const commentTime = new Date(now.getTime() + delayMin * 60000)
-        jobRow.set('Delay Comment', commentTime.toISOString())
+        
+        // Random 5-10 phút delay comment (Lấy từ sheet Setup GitHub nếu cần, ở đây hardcode cho nhanh)
+        jobRow.set('Delay Comment', new Date(now.getTime() + random(5, 10) * 60000).toISOString())
         jobRow.set('Comment', 'WAIT')
         await jobRow.save()
 
-        // Cập nhật Content Sheet -> Đánh dấu DONE
-        contentRow.set('Status', 'Done')
+        // Cập nhật Status trong Sheet Content thành "Done"
+        // (Trong list cột anh đưa có cột Status ở cuối cùng)
+        contentRow.set('Status', 'Done') 
         await contentRow.save()
-        console.log(`📌 Marked Content ${contentSTT} as Done.`)
 
     } catch (error) {
-        console.error('❌ Posting Failed:', error.message)
+        console.error('❌ Lỗi khi đăng bài:', error.message)
+        if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath)
     }
   }
 
-  // === TRƯỜNG HỢP 2: COMMENT (WAIT -> DONE) ===
+  // === XỬ LÝ COMMENT (GIỮ NGUYÊN) ===
   else if (jobRow.get('Status') === 'POSTED' && jobRow.get('Comment') === 'WAIT') {
     const linkReels = jobRow.get('Link Reels')
-    
-    // Hack: Lấy ID từ Link (nếu chưa lưu cột ReelId)
-    // Link: https://www.facebook.com/123456789
     let reelId = ''
-    const match = linkReels.match(/facebook\.com\/(\d+)/) || linkReels.match(/\/reel\/(\d+)/)
+    // Lấy ID từ link reels
+    const match = linkReels && (linkReels.match(/facebook\.com\/(\d+)/) || linkReels.match(/\/reel\/(\d+)/))
     if (match) reelId = match[1]
 
-    if (!reelId) {
-        console.error('❌ Could not extract Reel ID for commenting.')
-        return
-    }
+    if (reelId) {
+        // Đọc lại content để lấy nội dung comment
+        const contentSheet = doc.sheetsByTitle[contentTabName]
+        const contentRows = await contentSheet.getRows()
+        const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
+        
+        // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
+        const commentText = contentRow ? contentRow.get('Comment') : ''
+        
+        // Nếu anh muốn gắn cả link Shopee vào comment thì nối chuỗi ở đây
+        // const linkShopee = contentRow.get('Link Aff Shopee')
+        // const finalComment = linkShopee ? `${commentText}\n${linkShopee}` : commentText
 
-    // Lấy lại nội dung comment (phải đọc lại sheet content vì Log Progress không lưu text comment)
-    // Lưu ý: Logic này hơi rườm rà, tốt nhất mày nên lưu luôn nội dung comment vào Log Progress lúc Post
-    // Nhưng tao sẽ làm theo logic hiện tại: Đọc lại Content Sheet
-    const contentSheet = doc.sheetsByTitle[contentTabName]
-    const contentRows = await contentSheet.getRows()
-    const contentRow = contentRows.find(r => r.get('STT_SheetContent') === contentSTT)
-    const commentText = contentRow ? contentRow.get('Comment') : ''
-
-    if (commentText) {
-        try {
-            await postComment({
-                ReelId: reelId,
-                PageToken: pageToken,
-                CommentText: commentText
-            })
-            console.log('✅ Commented successfully.')
-            jobRow.set('Comment', 'DONE')
-            await jobRow.save()
-        } catch (error) {
-            console.error('❌ Comment Failed:', error.message)
+        if (commentText) {
+             await postComment({ 
+                 ReelId: reelId, 
+                 PageToken: pageToken, 
+                 CommentText: commentText 
+             })
+             console.log('✅ Comment thành công.')
         }
-    } else {
-        console.log('⚠️ No comment text found, marking DONE.')
         jobRow.set('Comment', 'DONE')
         await jobRow.save()
+    } else {
+        console.error('❌ Không tìm thấy Reel ID từ link.')
     }
   }
 }
 
 main().catch(err => {
-  console.error('🔥 Critical Error:', err)
+  console.error(err)
   process.exit(1)
 })

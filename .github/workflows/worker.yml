@@ -1,0 +1,31 @@
+name: Auto Reels Worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+
+      - name: Run worker
+        env:
+          SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GS_CLIENT_EMAIL: ${{ secrets.GS_CLIENT_EMAIL }}
+          GS_PRIVATE_KEY: ${{ secrets.GS_PRIVATE_KEY }}
+        run: node index.js

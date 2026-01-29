@@ -39,8 +39,9 @@ async function main() {
   }
 
   // Gán dữ liệu vào job để facebook.js dùng được
-  job.PageId = pageInfo.PageId       // Cột PageId bên tab PAGE_TOKEN
-  job.PageToken = pageInfo.PageToken // Cột PageToken bên tab PAGE_TOKEN
+  // CHÚ Ý: Map đúng tên cột trong ảnh bạn gửi
+  job.PageId = pageInfo.PageID       // Cột PageID bên tab PAGE_TOKEN
+  job.PageToken = pageInfo.Token     // Cột Token bên tab PAGE_TOKEN
   job.VideoPath = job['Sheet Content'] // Map cột Sheet Content thành đường dẫn video
   
   // Kiểm tra an toàn

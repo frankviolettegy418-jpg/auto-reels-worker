@@ -206,9 +206,11 @@ async function main() {
         console.error('❌ Không tìm thấy Reel ID từ link.')
     }
   }
+}
 
 main().catch(err => {
   console.error(err)
   process.exit(1)
 })
+
 

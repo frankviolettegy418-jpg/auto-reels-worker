@@ -17,21 +17,27 @@ function spinText(text) {
   })
 }
 
-// --- HÀM FORMAT NGÀY GIỜ VN (DD/MM/YYYY HH:mm:ss) ---
+// --- HÀM FORMAT NGÀY GIỜ VN (UTC+7) ĐỂ GHI VÀO SHEET ---
 function formatDate(date) {
-  const d = new Date(date)
+  // Cộng thêm 7 tiếng vào giờ gốc (UTC) để ra giờ VN
+  const vnTime = new Date(date.getTime() + 7 * 60 * 60 * 1000)
+  
   const pad = (num) => num.toString().padStart(2, '0')
-  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${pad(vnTime.getDate())}/${pad(vnTime.getMonth() + 1)}/${vnTime.getFullYear()} ${pad(vnTime.getHours())}:${pad(vnTime.getMinutes())}:${pad(vnTime.getSeconds())}`
 }
 
-// --- HÀM ĐỌC NGÀY GIỜ VN VỀ ĐỐI TƯỢNG DATE ---
+// --- HÀM ĐỌC NGÀY GIỜ VN TỪ SHEET VỀ ĐỐI TƯỢNG DATE (UTC) ---
 function parseTimeVN(timeStr) {
   if (!timeStr) return null
-  // timeStr dạng: 30/01/2026 09:29:00
+  // timeStr dạng VN: 30/01/2026 10:00:00
   const [datePart, timePart] = timeStr.split(' ')
   const [day, month, year] = datePart.split('/')
-  // Convert sang format ISO để new Date hiểu: YYYY-MM-DDTHH:mm:ss
-  return new Date(`${year}-${month}-${day}T${timePart}`)
+  
+  // Tạo Date tạm (Nó sẽ hiểu là 10:00 UTC)
+  const tempDate = new Date(`${year}-${month}-${day}T${timePart}`)
+  
+  // Trừ đi 7 tiếng để về lại UTC chuẩn cho máy tính so sánh
+  return new Date(tempDate.getTime() - 7 * 60 * 60 * 1000)
 }
 
 // Hàm tải video từ Link Google Drive về máy
@@ -57,6 +63,7 @@ async function downloadVideo(url, destPath) {
 
 async function main() {
   const doc = await getDoc()
+  // Lấy giờ hiện tại (UTC trên server)
   const now = new Date()
 
   // 1. ĐỌC CẤU HÌNH TỪ SHEET "Setup GibHub"
@@ -68,7 +75,7 @@ async function main() {
       const setupRows = await setupSheet.getRows()
       const delayRow = setupRows.find(r => r.get('Setup') === 'Delay Comment')
       if (delayRow) {
-          const val = delayRow.get('Delay (phút)') // VD: "5-10" hoặc "5"
+          const val = delayRow.get('Delay (phút)')
           if (val && val.includes('-')) {
               const parts = val.split('-')
               minDelay = parseInt(parts[0].trim())
@@ -95,13 +102,13 @@ async function main() {
     // Ưu tiên chạy NOW
     if (status === 'NOW') return true
     
-    // Chạy WAIT nếu tới giờ (Dùng hàm parseTimeVN)
+    // Chạy WAIT nếu tới giờ (Dùng hàm parseTimeVN đã sửa)
     if (status === 'WAIT' && schedule) {
         const targetTime = parseTimeVN(schedule)
         return targetTime <= now
     }
     
-    // Chạy Comment nếu tới giờ (Dùng hàm parseTimeVN)
+    // Chạy Comment nếu tới giờ (Dùng hàm parseTimeVN đã sửa)
     if (status === 'POSTED' && commentStatus === 'WAIT' && delayComment) {
         const targetTime = parseTimeVN(delayComment)
         return targetTime <= now
@@ -193,14 +200,17 @@ async function main() {
         jobRow.set('Status', 'POSTED')
         jobRow.set('Link Reels', reelLink)
         
-        // --- LOGIC TÍNH GIỜ DELAY COMMENT MỚI ---
+        // --- TÍNH GIỜ DELAY COMMENT ---
+        // 1. Random số phút delay (VD: 5 phút)
         const minutesToAdd = random(minDelay, maxDelay)
-        const delayTime = new Date(now.getTime() + minutesToAdd * 60000)
         
-        // Ghi vào sheet với định dạng DD/MM/YYYY HH:mm:ss
-        jobRow.set('Delay Comment', formatDate(delayTime))
+        // 2. Cộng vào giờ hiện tại (UTC)
+        const delayTimeUTC = new Date(now.getTime() + minutesToAdd * 60000)
+        
+        // 3. Gọi hàm formatDate (Hàm này sẽ tự cộng thêm 7 tiếng để ra giờ VN đẹp)
+        jobRow.set('Delay Comment', formatDate(delayTimeUTC))
+        
         jobRow.set('Comment', 'WAIT')
-        
         await jobRow.save()
 
     } catch (error) {

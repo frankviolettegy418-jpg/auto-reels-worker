@@ -8,6 +8,16 @@ function random(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
+// --- THÊM HÀM NÀY VÀO ĐÂY ---
+function spinText(text) {
+  if (!text) return ''
+  // Tìm tất cả các đoạn trong dấu {} và random lựa chọn ngăn cách bởi |
+  return text.replace(/\{([^}]+)\}/g, (match, group) => {
+    const options = group.split('|')
+    return options[Math.floor(Math.random() * options.length)]
+  })
+}
+
 // Hàm tải video từ Link Google Drive về máy
 async function downloadVideo(url, destPath) {
   // Regex lấy File ID từ link (link view hoặc link share đều chạy)
@@ -99,7 +109,7 @@ async function main() {
     return
   }
 
-  // === XỬ LÝ ĐĂNG REELS ===
+// === XỬ LÝ ĐĂNG REELS ===
   if (jobRow.get('Status') === 'NOW' || jobRow.get('Status') === 'WAIT') {
     
     // Mở Sheet Content (VD: 01. GiaDung)
@@ -110,8 +120,6 @@ async function main() {
     }
 
     const contentRows = await contentSheet.getRows()
-    // Tìm dòng có cột STT khớp với STT_SheetContent
-    // Lưu ý: Ép kiểu về String để so sánh cho chắc ăn
     const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
 
     if (!contentRow) {
@@ -119,8 +127,11 @@ async function main() {
         return
     }
 
-    // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
-    const caption = contentRow.get('Caption')
+    // 👉 1. XỬ LÝ RANDOM CAPTION
+    const rawCaption = contentRow.get('Caption')
+    const caption = spinText(rawCaption) // Random nội dung Caption
+
+    // 👉 2. LẤY VIDEO TỪ DRIVE
     const videoLink = contentRow.get('Video Google Driver') 
 
     if (!videoLink) {
@@ -129,11 +140,9 @@ async function main() {
     }
 
     console.log(`📥 Đang tải video từ Drive: ${videoLink}`)
-    // Đường dẫn lưu tạm file video
     const tempVideoPath = path.join(__dirname, `video_temp_${Date.now()}.mp4`)
 
     try {
-        // Tải video
         await downloadVideo(videoLink, tempVideoPath)
         console.log('✅ Tải video thành công.')
 
@@ -144,26 +153,20 @@ async function main() {
             VideoFilePath: tempVideoPath
         }
 
-        // Đăng bài
         const { reelId, reelLink } = await postReels(jobData)
         console.log(`✅ Đăng thành công: ${reelLink}`)
 
-        // Xóa file tạm
         if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath)
 
         // Cập nhật Log Progress
         jobRow.set('Status', 'POSTED')
         jobRow.set('Link Reels', reelLink)
         
-        // Random 5-10 phút delay comment (Lấy từ sheet Setup GitHub nếu cần, ở đây hardcode cho nhanh)
         jobRow.set('Delay Comment', new Date(now.getTime() + random(5, 10) * 60000).toISOString())
         jobRow.set('Comment', 'WAIT')
         await jobRow.save()
 
-        // Cập nhật Status trong Sheet Content thành "Done"
-        // (Trong list cột anh đưa có cột Status ở cuối cùng)
-        contentRow.set('Status', 'Done') 
-        await contentRow.save()
+        // ❌ ĐÃ BỎ ĐOẠN UPDATE STATUS TRONG SHEET CONTENT
 
     } catch (error) {
         console.error('❌ Lỗi khi đăng bài:', error.message)
@@ -171,27 +174,22 @@ async function main() {
     }
   }
 
-  // === XỬ LÝ COMMENT (GIỮ NGUYÊN) ===
+  // === XỬ LÝ COMMENT ===
   else if (jobRow.get('Status') === 'POSTED' && jobRow.get('Comment') === 'WAIT') {
     const linkReels = jobRow.get('Link Reels')
     let reelId = ''
-    // Lấy ID từ link reels
     const match = linkReels && (linkReels.match(/facebook\.com\/(\d+)/) || linkReels.match(/\/reel\/(\d+)/))
     if (match) reelId = match[1]
 
     if (reelId) {
-        // Đọc lại content để lấy nội dung comment
         const contentSheet = doc.sheetsByTitle[contentTabName]
         const contentRows = await contentSheet.getRows()
         const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
         
-        // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
-        const commentText = contentRow ? contentRow.get('Comment') : ''
+        // 👉 3. XỬ LÝ RANDOM COMMENT
+        const rawComment = contentRow ? contentRow.get('Comment') : ''
+        const commentText = spinText(rawComment) // Random nội dung Comment
         
-        // Nếu anh muốn gắn cả link Shopee vào comment thì nối chuỗi ở đây
-        // const linkShopee = contentRow.get('Link Aff Shopee')
-        // const finalComment = linkShopee ? `${commentText}\n${linkShopee}` : commentText
-
         if (commentText) {
              await postComment({ 
                  ReelId: reelId, 
@@ -200,15 +198,17 @@ async function main() {
              })
              console.log('✅ Comment thành công.')
         }
+        
+        // Chỉ cập nhật Log Progress, không động vào Sheet Content
         jobRow.set('Comment', 'DONE')
         await jobRow.save()
     } else {
         console.error('❌ Không tìm thấy Reel ID từ link.')
     }
   }
-}
 
 main().catch(err => {
   console.error(err)
   process.exit(1)
 })
+

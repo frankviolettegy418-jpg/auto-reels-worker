@@ -67,12 +67,16 @@ async function main() {
   const now = new Date()
 
   // 1. ĐỌC CẤU HÌNH TỪ SHEET "Setup GibHub"
+  // 1. ĐỌC CẤU HÌNH TỪ SHEET "Setup GibHub"
   const setupSheet = doc.sheetsByTitle['Setup GibHub']
   let minDelay = 5
   let maxDelay = 10 
+  let actionWindow = 60 // Mặc định 60 phút nếu không tìm thấy
 
   if (setupSheet) {
       const setupRows = await setupSheet.getRows()
+      
+      // Đọc Delay Comment
       const delayRow = setupRows.find(r => r.get('Setup') === 'Delay Comment')
       if (delayRow) {
           const val = delayRow.get('Delay (phút)')
@@ -84,8 +88,15 @@ async function main() {
               minDelay = maxDelay = parseInt(val.trim())
           }
       }
+
+      // Đọc Action Progress (NEW)
+      const actionRow = setupRows.find(r => r.get('Setup') === 'Action Progress')
+      if (actionRow) {
+          const val = actionRow.get('Delay (phút)')
+          if (val) actionWindow = parseInt(val.trim())
+      }
   }
-  console.log(`⚙️ Cấu hình Delay Comment: ${minDelay} - ${maxDelay} phút`)
+  console.log(`⚙️ Cấu hình: Delay Comment ${minDelay}-${maxDelay}p | Action Window: ${actionWindow}p`)
 
   // 2. ĐỌC LOG PROGRESS
   const logSheet = doc.sheetsByTitle['Log Progress']
@@ -93,25 +104,32 @@ async function main() {
   const logs = await logSheet.getRows({ limit: 1000 })
   
   // 3. TÌM JOB CẦN XỬ LÝ
+  // Tính thời gian giới hạn (Hiện tại - Action Progress phút)
+  // Ví dụ: Action Progress 60p. Bây giờ là 10h. LimitTime là 9h.
+  // Chỉ những lệnh từ 9h đến 10h mới được chạy. Lệnh lúc 8h (quá cũ) bỏ qua.
+  const limitTime = new Date(now.getTime() - actionWindow * 60000)
+
+  // 3. TÌM JOB CẦN XỬ LÝ
   const jobRow = logs.find(row => {
     const status = row.get('Status')
     const schedule = row.get('ScheduleTime')
     const delayComment = row.get('Delay Comment')
     const commentStatus = row.get('Comment')
 
-    // Ưu tiên chạy NOW
+    // Ưu tiên chạy NOW (NOW là chạy ngay lập tức, không cần check thời gian quá khứ)
     if (status === 'NOW') return true
     
-    // Chạy WAIT nếu tới giờ (Dùng hàm parseTimeVN đã sửa)
+    // Chạy WAIT nếu tới giờ VÀ nằm trong Action Progress
     if (status === 'WAIT' && schedule) {
         const targetTime = parseTimeVN(schedule)
-        return targetTime <= now
+        // Logic: Phải nhỏ hơn hiện tại VÀ Lớn hơn giới hạn quá khứ
+        return targetTime <= now && targetTime >= limitTime
     }
     
-    // Chạy Comment nếu tới giờ (Dùng hàm parseTimeVN đã sửa)
+    // Chạy Comment nếu tới giờ VÀ nằm trong Action Progress
     if (status === 'POSTED' && commentStatus === 'WAIT' && delayComment) {
         const targetTime = parseTimeVN(delayComment)
-        return targetTime <= now
+        return targetTime <= now && targetTime >= limitTime
     }
     return false
   })
@@ -220,6 +238,7 @@ async function main() {
   }
 
   // === XỬ LÝ COMMENT ===
+  // === XỬ LÝ COMMENT ===
   else if (jobRow.get('Status') === 'POSTED' && jobRow.get('Comment') === 'WAIT') {
     const linkReels = jobRow.get('Link Reels')
     let reelId = ''
@@ -231,17 +250,40 @@ async function main() {
         const contentRows = await contentSheet.getRows()
         const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
         
-        // Random Comment
+        // 1. Random Text Comment
         const rawComment = contentRow ? contentRow.get('Comment') : ''
         const commentText = spinText(rawComment) 
+
+        // 2. Xử lý Ảnh Comment (NEW)
+        // Lấy link ảnh từ cột "Image Comment" (Theo tên cột anh báo)
+        const imageLink = contentRow ? contentRow.get('Image Comment') : ''
+        let tempImagePath = null
+
+        if (imageLink) {
+            console.log(`📥 Tìm thấy ảnh comment, đang tải: ${imageLink}`)
+            tempImagePath = path.join(__dirname, `img_cmt_${Date.now()}.jpg`) // Lưu đuôi jpg cho dễ
+            try {
+                // Tái sử dụng hàm downloadVideo để tải ảnh (vì logic tải từ Drive giống hệt nhau)
+                await downloadVideo(imageLink, tempImagePath)
+            } catch (err) {
+                console.error('❌ Lỗi tải ảnh comment:', err.message)
+                tempImagePath = null // Lỗi thì bỏ qua ảnh, chỉ comment text
+            }
+        }
         
-        if (commentText) {
+        if (commentText || tempImagePath) {
              await postComment({ 
                  ReelId: reelId, 
                  PageToken: pageToken, 
-                 CommentText: commentText 
+                 CommentText: commentText,
+                 ImageFilePath: tempImagePath // Truyền đường dẫn ảnh sang facebook.js
              })
-             console.log(`✅ Comment thành công: ${commentText}`)
+             console.log(`✅ Comment thành công (Có ảnh: ${!!tempImagePath})`)
+        }
+        
+        // Xóa ảnh tạm sau khi comment xong
+        if (tempImagePath && fs.existsSync(tempImagePath)) {
+            fs.unlinkSync(tempImagePath)
         }
         
         jobRow.set('Comment', 'DONE')
@@ -256,3 +298,4 @@ main().catch(err => {
   console.error(err)
   process.exit(1)
 })
+

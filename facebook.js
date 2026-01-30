@@ -30,20 +30,35 @@ async function postReels(job) {
 }
 
 async function postComment(job) {
-  if (!job.CommentText) return
+  if (!job.CommentText && !job.ImageFilePath) return // Không có text cũng ko có ảnh thì nghỉ
   
   console.log(`💬 Commenting on Reel ${job.ReelId}...`)
 
-  await fetch(
+  const form = new FormData()
+  form.append('access_token', job.PageToken)
+  
+  if (job.CommentText) {
+      form.append('message', job.CommentText)
+  }
+
+  // Nếu có ảnh thì gửi kèm
+  if (job.ImageFilePath && fs.existsSync(job.ImageFilePath)) {
+      console.log('🖼️ Uploading comment image...')
+      form.append('source', fs.createReadStream(job.ImageFilePath))
+  }
+
+  const res = await fetch(
     `https://graph.facebook.com/v19.0/${job.ReelId}/comments`,
     {
       method: 'POST',
-      body: new URLSearchParams({
-        access_token: job.PageToken,
-        message: job.CommentText
-      })
+      body: form
     }
   )
+  
+  const json = await res.json()
+  if (json.error) throw new Error(json.error.message)
+  return json
 }
 
 module.exports = { postReels, postComment }
+

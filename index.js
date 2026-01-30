@@ -8,19 +8,34 @@ function random(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
-// --- THÊM HÀM NÀY VÀO ĐÂY ---
+// --- HÀM XỬ LÝ RANDOM SPIN CONTENT ---
 function spinText(text) {
   if (!text) return ''
-  // Tìm tất cả các đoạn trong dấu {} và random lựa chọn ngăn cách bởi |
   return text.replace(/\{([^}]+)\}/g, (match, group) => {
     const options = group.split('|')
     return options[Math.floor(Math.random() * options.length)]
   })
 }
 
+// --- HÀM FORMAT NGÀY GIỜ VN (DD/MM/YYYY HH:mm:ss) ---
+function formatDate(date) {
+  const d = new Date(date)
+  const pad = (num) => num.toString().padStart(2, '0')
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+// --- HÀM ĐỌC NGÀY GIỜ VN VỀ ĐỐI TƯỢNG DATE ---
+function parseTimeVN(timeStr) {
+  if (!timeStr) return null
+  // timeStr dạng: 30/01/2026 09:29:00
+  const [datePart, timePart] = timeStr.split(' ')
+  const [day, month, year] = datePart.split('/')
+  // Convert sang format ISO để new Date hiểu: YYYY-MM-DDTHH:mm:ss
+  return new Date(`${year}-${month}-${day}T${timePart}`)
+}
+
 // Hàm tải video từ Link Google Drive về máy
 async function downloadVideo(url, destPath) {
-  // Regex lấy File ID từ link (link view hoặc link share đều chạy)
   const idMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/)
   if (!idMatch) throw new Error('Invalid Google Drive Link')
   const fileId = idMatch[1]
@@ -44,12 +59,33 @@ async function main() {
   const doc = await getDoc()
   const now = new Date()
 
-  // 1. ĐỌC LOG PROGRESS
+  // 1. ĐỌC CẤU HÌNH TỪ SHEET "Setup GibHub"
+  const setupSheet = doc.sheetsByTitle['Setup GibHub']
+  let minDelay = 5
+  let maxDelay = 10 
+
+  if (setupSheet) {
+      const setupRows = await setupSheet.getRows()
+      const delayRow = setupRows.find(r => r.get('Setup') === 'Delay Comment')
+      if (delayRow) {
+          const val = delayRow.get('Delay (phút)') // VD: "5-10" hoặc "5"
+          if (val && val.includes('-')) {
+              const parts = val.split('-')
+              minDelay = parseInt(parts[0].trim())
+              maxDelay = parseInt(parts[1].trim())
+          } else if (val) {
+              minDelay = maxDelay = parseInt(val.trim())
+          }
+      }
+  }
+  console.log(`⚙️ Cấu hình Delay Comment: ${minDelay} - ${maxDelay} phút`)
+
+  // 2. ĐỌC LOG PROGRESS
   const logSheet = doc.sheetsByTitle['Log Progress']
   if (!logSheet) throw new Error('Không tìm thấy sheet "Log Progress"')
   const logs = await logSheet.getRows({ limit: 1000 })
   
-  // 2. TÌM JOB CẦN XỬ LÝ (Khớp logic NOW hoặc WAIT)
+  // 3. TÌM JOB CẦN XỬ LÝ
   const jobRow = logs.find(row => {
     const status = row.get('Status')
     const schedule = row.get('ScheduleTime')
@@ -59,17 +95,15 @@ async function main() {
     // Ưu tiên chạy NOW
     if (status === 'NOW') return true
     
-    // Chạy WAIT nếu tới giờ
+    // Chạy WAIT nếu tới giờ (Dùng hàm parseTimeVN)
     if (status === 'WAIT' && schedule) {
-        const [datePart, timePart] = schedule.split(' ')
-        const [day, month, year] = datePart.split('/')
-        const targetTime = new Date(`${year}-${month}-${day}T${timePart}`)
+        const targetTime = parseTimeVN(schedule)
         return targetTime <= now
     }
     
-    // Chạy Comment nếu tới giờ
+    // Chạy Comment nếu tới giờ (Dùng hàm parseTimeVN)
     if (status === 'POSTED' && commentStatus === 'WAIT' && delayComment) {
-        const targetTime = new Date(delayComment)
+        const targetTime = parseTimeVN(delayComment)
         return targetTime <= now
     }
     return false
@@ -80,19 +114,18 @@ async function main() {
     return
   }
 
-  // Lấy thông tin từ dòng Log tìm được
+  // Lấy thông tin cơ bản
   const pageSet = jobRow.get('PageSet') 
-  const contentTabName = jobRow.get('Sheet Content') // VD: 01. GiaDung
-  const contentSTT = jobRow.get('STT_SheetContent') // VD: 21
+  const contentTabName = jobRow.get('Sheet Content') 
+  const contentSTT = jobRow.get('STT_SheetContent') 
 
   console.log(`🚀 Xử lý Job: Row ${jobRow.rowNumber} | Sheet: ${contentTabName} | STT: ${contentSTT}`)
 
-  // 3. TRA CỨU TOKEN TRONG PAGE_TOKEN (Theo tên cột anh đưa)
+  // 4. TRA CỨU TOKEN
   const tokenSheet = doc.sheetsByTitle['PAGE_TOKEN']
   if (!tokenSheet) throw new Error('Không tìm thấy sheet "PAGE_TOKEN"')
     
   const tokenRows = await tokenSheet.getRows()
-  // So khớp cột PageSet
   const pageInfo = tokenRows.find(r => r.get('PageSet') === pageSet)
 
   if (!pageInfo) {
@@ -100,7 +133,6 @@ async function main() {
     return
   }
   
-  // 👉 TÊN CỘT CHÍNH XÁC ANH ĐƯA
   const pageId = pageInfo.get('PageID') 
   const pageToken = pageInfo.get('Token') 
 
@@ -109,10 +141,9 @@ async function main() {
     return
   }
 
-// === XỬ LÝ ĐĂNG REELS ===
+  // === XỬ LÝ ĐĂNG REELS ===
   if (jobRow.get('Status') === 'NOW' || jobRow.get('Status') === 'WAIT') {
     
-    // Mở Sheet Content (VD: 01. GiaDung)
     const contentSheet = doc.sheetsByTitle[contentTabName]
     if (!contentSheet) {
         console.error(`❌ Không tìm thấy sheet nội dung: "${contentTabName}"`)
@@ -127,11 +158,11 @@ async function main() {
         return
     }
 
-    // 👉 1. XỬ LÝ RANDOM CAPTION
+    // Random Caption
     const rawCaption = contentRow.get('Caption')
-    const caption = spinText(rawCaption) // Random nội dung Caption
+    const caption = spinText(rawCaption)
 
-    // 👉 2. LẤY VIDEO TỪ DRIVE
+    // Lấy Video
     const videoLink = contentRow.get('Video Google Driver') 
 
     if (!videoLink) {
@@ -162,11 +193,15 @@ async function main() {
         jobRow.set('Status', 'POSTED')
         jobRow.set('Link Reels', reelLink)
         
-        jobRow.set('Delay Comment', new Date(now.getTime() + random(5, 10) * 60000).toISOString())
+        // --- LOGIC TÍNH GIỜ DELAY COMMENT MỚI ---
+        const minutesToAdd = random(minDelay, maxDelay)
+        const delayTime = new Date(now.getTime() + minutesToAdd * 60000)
+        
+        // Ghi vào sheet với định dạng DD/MM/YYYY HH:mm:ss
+        jobRow.set('Delay Comment', formatDate(delayTime))
         jobRow.set('Comment', 'WAIT')
+        
         await jobRow.save()
-
-        // ❌ ĐÃ BỎ ĐOẠN UPDATE STATUS TRONG SHEET CONTENT
 
     } catch (error) {
         console.error('❌ Lỗi khi đăng bài:', error.message)
@@ -186,9 +221,9 @@ async function main() {
         const contentRows = await contentSheet.getRows()
         const contentRow = contentRows.find(r => r.get('STT') == contentSTT)
         
-        // 👉 3. XỬ LÝ RANDOM COMMENT
+        // Random Comment
         const rawComment = contentRow ? contentRow.get('Comment') : ''
-        const commentText = spinText(rawComment) // Random nội dung Comment
+        const commentText = spinText(rawComment) 
         
         if (commentText) {
              await postComment({ 
@@ -196,10 +231,9 @@ async function main() {
                  PageToken: pageToken, 
                  CommentText: commentText 
              })
-             console.log('✅ Comment thành công.')
+             console.log(`✅ Comment thành công: ${commentText}`)
         }
         
-        // Chỉ cập nhật Log Progress, không động vào Sheet Content
         jobRow.set('Comment', 'DONE')
         await jobRow.save()
     } else {
@@ -212,5 +246,3 @@ main().catch(err => {
   console.error(err)
   process.exit(1)
 })
-
-
